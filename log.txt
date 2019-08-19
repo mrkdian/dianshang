@@ -3,6 +3,13 @@ Others: 0.950474, B_A: 0.858294, I_A: 0.878408, B_O: 0.865256, I_O: 0.875379, ma
 basline
 Others: 0.959301, B_A: 0.892057, I_A: 0.911227, B_O: 0.893746, I_O: 0.897141, match: 0.738916, match p: 0.716235, match r: 0.763081, category: 0.842888, polarity: 0.916057, avg: 0.881417
 
+bce cross punish!!
+Others: 0.959639, B_A: 0.890667, I_A: 0.906747, B_O: 0.894455, I_O: 0.898372, match: 0.886414, match p: 0.905918, match r: 0.867733, category: 0.860237, polarity: 0.902033, avg: 0.899820
+Others: 0.958758, B_A: 0.889336, I_A: 0.904864, B_O: 0.887581, I_O: 0.896784, match: 0.844009, match p: 0.876369, match r: 0.813953, category: 0.839101, polarity: 0.899130, avg: 0.889945
+
+bce cross train (接近75的时候收敛)
+Others: 0.999841, B_A: 0.999556, I_A: 0.999714, B_O: 0.999477, I_O: 0.999482, match: 0.911220, match p: 0.922925, match r: 0.899807, category: 0.999380, polarity: 0.992923, avg: 0.987699
+
 0.97 baseline
 Others: 0.958021, B_A: 0.870229, I_A: 0.861702, B_O: 0.867925, I_O: 0.900538, match: 0.735043, match p: 0.767857, match r: 0.704918, category: 0.925919, polarity: 0.992525, avg: 0.888988
 

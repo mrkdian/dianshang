@@ -183,7 +183,7 @@ class collate_fn:
                 assert not (label[0] == '_' and label[3] == '_')
 
             
-            _match_target = torch.zeros(len(_aspect_idx), len(_opinion_idx), dtype=torch.long)
+            _match_target = torch.zeros(len(_aspect_idx), len(_opinion_idx), dtype=torch.float) # binary cross entropy
             for a_id, o_id in success_match:
                 _match_target[a_id, o_id] = 1
             
@@ -289,7 +289,7 @@ class Model(nn.Module):
             nn.SELU(),
             nn.Linear(self.emb_size, self.emb_size // 2),
             nn.SELU(),
-            nn.Linear(self.emb_size // 2, 2)
+            nn.Linear(self.emb_size // 2, 1)
         )
 
         # self.aspect_match = nn.Linear(self.emb_size, 2)
@@ -312,7 +312,6 @@ class Model(nn.Module):
         self.opinion_polarity = nn.Linear(self.emb_size, len(POLARITY2ID.keys()))
 
         self.cross_entropy = nn.CrossEntropyLoss()
-
     def seq_gather(self):
         pass
 
@@ -472,7 +471,7 @@ class Model(nn.Module):
             assert len(bert_opinion_out) == len(lstm_opinion_out)
             _cross_category_score = torch.empty(len(bert_aspect_out), len(bert_opinion_out), len(CATEGORY2ID.keys()), device=device)
             _cross_polarity_score = torch.empty(len(bert_aspect_out), len(bert_opinion_out), len(POLARITY2ID.keys()), device=device)
-            _match_score = torch.empty(len(bert_aspect_out), len(bert_opinion_out), 2, device=device)
+            _match_score = torch.empty(len(bert_aspect_out), len(bert_opinion_out), device=device)
             for i in range(len(bert_aspect_out)):
                 for j in range(len(bert_opinion_out)):
                     bert_a_out = bert_aspect_out[i]
@@ -482,7 +481,7 @@ class Model(nn.Module):
                     lstm_o_out = lstm_opinion_out[j]
                     # o_p = _opinion_idx[j][0]
 
-                    _match_score[i, j] = self.match(torch.cat((lstm_a_out, lstm_o_out), dim=-1))
+                    _match_score[i, j] = self.match(torch.cat((bert_a_out, bert_o_out), dim=-1))
                     
                     # _match_score[i, j] = self.aspect_match(lstm_a_out) + self.opinion_match(lstm_o_out)
                     # _match_score[i, j] = self.aspect_match(a_h_out.squeeze() + self.positional_encoding.get_pe(a_p)) + \
@@ -524,10 +523,20 @@ class Model(nn.Module):
         match_count = 0
         for b in range(len(match_target)):
             if match_target[b].numel() > 0:
+                # calculate the probility
+                match_prob = torch.empty_like(match_score[b])
+                for i in range(match_score[b].shape[0]):
+                    for j in range(match_score[b].shape[1]):
+                          score = torch.cat((match_score[b][i], match_score[b][:i, j], match_score[b][i + 1:, j]))
+                          # assert len(score) == match_score[b].shape[0] + match_score[b].shape[1] - 1
+                          match_prob[i, j] = nn.functional.softmax(score, dim=0)[j]
+
                 match_count += match_target[b].numel()
                 match_target[b] = match_target[b].to(device)
-                match_loss += nn.functional.cross_entropy(match_score[b].view(-1, match_score[b].shape[-1]),\
+                match_loss += nn.functional.binary_cross_entropy(match_prob.view(-1),\
                     match_target[b].view(-1), reduction='sum')
+                # match_loss += nn.functional.cross_entropy(match_score[b].view(-1, match_score[b].shape[-1]),\
+                #     match_target[b].view(-1), reduction='sum')
 
             _category_loss = 0
             _category_count = 0
@@ -603,7 +612,16 @@ class Model(nn.Module):
             if match_score[b].numel() < 1:
                 match_target.append(None)
             else:
-                match_target.append(torch.argmax(match_score[b], dim=-1))
+                _match_target = torch.empty_like(match_score[b], dtype=torch.long)
+                for i in range(match_score[b].shape[0]):
+                    for j in range(match_score[b].shape[1]):
+                        score = torch.cat((match_score[b][i], match_score[b][:i, j], match_score[b][i + 1:, j]))
+                        if torch.argmax(score) == j:
+                            _match_target[i, j] = 1
+                        else:
+                            _match_target[i, j] = 0
+                match_target.append(_match_target)
+                # match_target.append(torch.argmax(match_score[b], dim=-1))
             #category
             if len(single_aspect_category_score[b]) > 0:
                 _single_aspect_category_score = torch.stack(single_aspect_category_score[b], dim=0)
@@ -661,7 +679,7 @@ def test():
         device = torch.device('cuda')
 
     dataset = load_dataset('TRAIN/Train_reviews.csv', 'TRAIN/Train_labels.csv')
-    train_dataset, validate_dataset = split_dataset(dataset, 'TRAIN/shuffle.idx')
+    train_dataset, validate_dataset = split_dataset(dataset, 'TRAIN/shuffle.idx', 0.97)
 
     tokenizer = BertTokenizer(vocab_file='publish/vocab.txt', max_len=512)
     bert_pretraining = convert_tf_checkpoint_to_pytorch('./publish/bert_model.ckpt', './publish/bert_config.json')
@@ -734,6 +752,7 @@ def test():
             pbar.close()
             raise
         pbar.close()
+        optimizer.zero_grad()
         loss_statistic = {
             'total_loss': accum_total_loss / (step + 1),
             'seq_loss': accum_seq_labeling_loss / (step + 1),
@@ -741,7 +760,6 @@ def test():
             'category_loss': accum_category_loss / (step + 1),
             'polarity_loss': accum_polarity_loss / (step + 1)
         }
-        optimizer.zero_grad()
         
         
         model.eval()
@@ -865,18 +883,16 @@ def test():
         }
         avg_f1 = (np.sum(seq_metric) + match_f1 + category_f1 + polarity_f1) / 8
         print('avg: %f' % avg_f1)
-        # if avg_f1 > statistic['best_f1']:
-        #     statistic['best_f1'] = avg_f1
-        #     statistic['best_f1_epoch'] = epoch
-        #     torch.save(model.state_dict(), 'save_model/best.model')
-        # if match_f1 > statistic['best_match_f1']:
-        #     statistic['best_match_f1'] = match_f1
-        #     statistic['best_match_epoch'] = epoch
-        #     torch.save(model.state_dict(), 'save_model/best_match.model')
-        # statistic['epoch_detail'].append(epoch_statistic)
+    #     if avg_f1 > statistic['best_f1']:
+    #         statistic['best_f1'] = avg_f1
+    #         statistic['best_f1_epoch'] = epoch
+    #         torch.save(model.state_dict(), 'drive/best.model')
+    #     if match_f1 > statistic['best_match_f1']:
+    #         statistic['best_match_f1'] = match_f1
+    #         statistic['best_match_epoch'] = epoch
+    #         torch.save(model.state_dict(), 'drive/best_match.model')
+    #     statistic['epoch_detail'].append(epoch_statistic)
     # json.dump(statistic, open('statistic.json', mode='w'))
-
-    
 
 if __name__ == '__main__':
     test()
