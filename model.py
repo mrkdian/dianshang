@@ -284,8 +284,16 @@ class Model(nn.Module):
         self.aspect_att_val = nn.Linear(self.emb_size, self.emb_size)
         self.opinion_att_val = nn.Linear(self.emb_size, self.emb_size)
 
-        self.aspect_match = nn.Linear(self.emb_size, 2)
-        self.opinion_match = nn.Linear(self.emb_size, 2)
+        self.match = nn.Sequential(
+            nn.Linear(self.emb_size * 2, self.emb_size),
+            nn.SELU(),
+            nn.Linear(self.emb_size, self.emb_size // 2),
+            nn.SELU(),
+            nn.Linear(self.emb_size // 2, 2)
+        )
+
+        # self.aspect_match = nn.Linear(self.emb_size, 2)
+        # self.opinion_match = nn.Linear(self.emb_size, 2)
 
         # self.aspect_match = nn.Sequential(
         #     nn.Linear(self.emb_size, self.emb_size // 2),
@@ -474,9 +482,12 @@ class Model(nn.Module):
                     lstm_o_out = lstm_opinion_out[j]
                     # o_p = _opinion_idx[j][0]
 
-                    _match_score[i, j] = self.aspect_match(lstm_a_out) + self.opinion_match(lstm_o_out)
+                    _match_score[i, j] = self.match(torch.cat((lstm_a_out, lstm_o_out), dim=-1))
+                    
+                    # _match_score[i, j] = self.aspect_match(lstm_a_out) + self.opinion_match(lstm_o_out)
                     # _match_score[i, j] = self.aspect_match(a_h_out.squeeze() + self.positional_encoding.get_pe(a_p)) + \
                     #     self.opinion_match(o_h_out.squeeze() + self.positional_encoding.get_pe(o_p))
+
                     _cross_category_score[i, j] = _single_aspect_category_score[i] + _single_opinion_category_score[j]
                     _cross_polarity_score[i, j] = _single_aspect_polarity_score[i] + _single_opinion_polarity_score[j]
             
@@ -642,7 +653,7 @@ def test():
     # torch.autograd.set_detect_anomaly(True)
     load_save_model = False
     lr = 1e-5
-    batch_size = 8
+    batch_size = 4
     gpu = True
     torch.manual_seed(0)
     device = torch.device('cpu')
@@ -673,7 +684,7 @@ def test():
     )
 
     model = model.cuda()
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=0.01)
 
     statistic = {
         'best_f1': -100,
