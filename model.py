@@ -269,6 +269,13 @@ class Model(nn.Module):
         # self.aspect_encoder = nn.LSTM(input_size=self.emb_size, hidden_size=self.emb_size, batch_first=True)
         # self.opinion_encoder = nn.LSTM(input_size=self.emb_size, hidden_size=self.emb_size, batch_first=True)
 
+        self.lstm_a_att_q = nn.Linear(self.emb_size, 1) # query
+        self.lstm_o_att_q = nn.Linear(self.emb_size, 1)
+        self.lstm_a_att_k = nn.Linear(self.emb_size, self.emb_size) # key
+        self.lstm_o_att_k = nn.Linear(self.emb_size, self.emb_size)
+        self.lstm_a_att_v = nn.Linear(self.emb_size, self.emb_size) # value
+        self.lstm_o_att_v = nn.Linear(self.emb_size, self.emb_size)
+
 
         self.aspect_att_query = nn.Linear(self.emb_size, 1)
         self.opinion_att_query = nn.Linear(self.emb_size, 1)
@@ -389,59 +396,85 @@ class Model(nn.Module):
             _aspect_idx = aspect_idx[b]
             _opinion_idx = opinion_idx[b]
 
-            aspect_out = []
-            opinion_out = []
+            lstm_aspect_out = []
+            lstm_opinion_out = []
+            bert_aspect_out = []
+            bert_opinion_out = []
             _single_aspect_category_score = []
             _single_opinion_category_score = []
             _single_aspect_polarity_score = []
             _single_opinion_polarity_score = []
 
             for idx in _aspect_idx:
-                aspect_emb = torch.unsqueeze(bert_emb[b, idx], 0)
+                bert_aspect_emb = torch.unsqueeze(bert_emb[b, idx], 0)
+                lstm_aspect_emb = torch.unsqueeze(g_lstm_emb[b, idx], 0)
                 # _, (a_h_out, a_c_cout) = self.aspect_encoder(aspect_emb)
                 # a_h_out = torch.unsqueeze(torch.sum(aspect_emb, dim=1), 1)
                 
-                # attention mechanism
-                key = self.aspect_att_key(aspect_emb)
-                val = self.aspect_att_val(aspect_emb)
+                # attention mechanism from bert
+                key = self.aspect_att_key(bert_aspect_emb)
+                val = self.aspect_att_val(bert_aspect_emb)
                 att = self.aspect_att_query(key)
                 val = val * att
-                a_h_out = torch.unsqueeze(torch.sum(val, dim=1), 1)
+                bert_a_out = torch.unsqueeze(torch.sum(val, dim=1), 1)
 
-                s_a_c_out = torch.squeeze(self.aspect_category(a_h_out))
-                s_a_p_out = torch.squeeze(self.aspect_polarity(a_h_out))
-                aspect_out.append(a_h_out)
+                # attention mechanism from general lstm
+                key = self.lstm_a_att_k(lstm_aspect_emb)
+                val = self.lstm_a_att_v(lstm_aspect_emb)
+                att = self.lstm_a_att_q(key)
+                val = val * att
+                lstm_a_out = torch.unsqueeze(torch.sum(val, dim=1), 1)
+
+                s_a_c_out = torch.squeeze(self.aspect_category(bert_a_out))
+                s_a_p_out = torch.squeeze(self.aspect_polarity(bert_a_out))
+
+                lstm_aspect_out.append(lstm_a_out)
+                bert_aspect_out.append(bert_a_out)
                 _single_aspect_category_score.append(s_a_c_out)
                 _single_aspect_polarity_score.append(s_a_p_out)
             for idx in _opinion_idx:
-                opinion_emb = torch.unsqueeze(bert_emb[b, idx], 0)
+                bert_opinion_emb = torch.unsqueeze(bert_emb[b, idx], 0)
+                lstm_opinion_emb = torch.unsqueeze(g_lstm_emb[b, idx], 0)
                 # _, (o_h_out, o_c_out) = self.opinion_encoder(opinion_emb)
                 # o_h_out = torch.unsqueeze(torch.sum(opinion_emb, dim=1), 1)
 
-                # attention mechanism
-                key = self.opinion_att_key(opinion_emb)
-                val = self.opinion_att_val(opinion_emb)
+                # attention mechanism from bert
+                key = self.opinion_att_key(bert_opinion_emb)
+                val = self.opinion_att_val(bert_opinion_emb)
                 att = self.opinion_att_query(key)
                 val = val * att
-                o_h_out = torch.unsqueeze(torch.sum(val, dim=1), 1)
+                bert_o_out = torch.unsqueeze(torch.sum(val, dim=1), 1)
 
-                s_o_c_out = torch.squeeze(self.opinion_category(o_h_out))
-                s_o_p_out = torch.squeeze(self.opinion_polarity(o_h_out))
-                opinion_out.append(o_h_out)
+                # attention mechanism from general lstm
+                key = self.lstm_o_att_k(lstm_opinion_emb)
+                val = self.lstm_o_att_v(lstm_opinion_emb)
+                att = self.lstm_o_att_q(key)
+                val = val * att
+                lstm_o_out = torch.unsqueeze(torch.sum(val, dim=1), 1)
+
+                s_o_c_out = torch.squeeze(self.opinion_category(bert_o_out))
+                s_o_p_out = torch.squeeze(self.opinion_polarity(bert_o_out))
+
+                lstm_opinion_out.append(lstm_o_out)
+                bert_opinion_out.append(bert_o_out)
                 _single_opinion_category_score.append(s_o_c_out)
                 _single_opinion_polarity_score.append(s_o_p_out)
 
-            _cross_category_score = torch.empty(len(aspect_out), len(opinion_out), len(CATEGORY2ID.keys()), device=device)
-            _cross_polarity_score = torch.empty(len(aspect_out), len(opinion_out), len(POLARITY2ID.keys()), device=device)
-            _match_score = torch.empty(len(aspect_out), len(opinion_out), 2, device=device)
-            for i in range(len(aspect_out)):
-                for j in range(len(opinion_out)):
-                    a_h_out = aspect_out[i]
-                    a_p = _aspect_idx[i][0]
-                    o_h_out = opinion_out[j]
-                    o_p = _opinion_idx[j][0]
+            assert len(bert_aspect_out) == len(lstm_aspect_out)
+            assert len(bert_opinion_out) == len(lstm_opinion_out)
+            _cross_category_score = torch.empty(len(bert_aspect_out), len(bert_opinion_out), len(CATEGORY2ID.keys()), device=device)
+            _cross_polarity_score = torch.empty(len(bert_aspect_out), len(bert_opinion_out), len(POLARITY2ID.keys()), device=device)
+            _match_score = torch.empty(len(bert_aspect_out), len(bert_opinion_out), 2, device=device)
+            for i in range(len(bert_aspect_out)):
+                for j in range(len(bert_opinion_out)):
+                    bert_a_out = bert_aspect_out[i]
+                    lstm_a_out = lstm_aspect_out[i]
+                    # a_p = _aspect_idx[i][0]
+                    bert_o_out = bert_opinion_out[j]
+                    lstm_o_out = lstm_opinion_out[j]
+                    # o_p = _opinion_idx[j][0]
 
-                    _match_score[i, j] = self.aspect_match(a_h_out) + self.opinion_match(o_h_out)
+                    _match_score[i, j] = self.aspect_match(lstm_a_out) + self.opinion_match(lstm_o_out)
                     # _match_score[i, j] = self.aspect_match(a_h_out.squeeze() + self.positional_encoding.get_pe(a_p)) + \
                     #     self.opinion_match(o_h_out.squeeze() + self.positional_encoding.get_pe(o_p))
                     _cross_category_score[i, j] = _single_aspect_category_score[i] + _single_opinion_category_score[j]
