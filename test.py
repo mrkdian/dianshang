@@ -6,7 +6,7 @@ import pandas as pd
 from tqdm import tqdm
 
 from pytorch_transformers import BertModel, load_tf_weights_in_bert, BertConfig, BertForPreTraining, BertTokenizer
-from model import convert_tf_checkpoint_to_pytorch, Model, Dataset
+from model import convert_tf_checkpoint_to_pytorch, Model, Dataset, UNK_TOKEN, load_dataset
 
 ID2CATEGORY = [
     '价格',
@@ -39,23 +39,32 @@ def load_review_dataset(review_filepath):
 
 # data only contain review
 class test_collate_fn:
-    def __init__(self, tokenizer):
+    def __init__(self, tokenizer, known_token=None):
         self.tokenizer = tokenizer
+        self.known_token = known_token
     
     def __call__(self, batch_data):
         batch_idx = []
-        batch_X = []
+        origin_batch_X = []
+        batch_X = [] # some token are replaced by UNK
         len_X = []
         mask = []
         for idx, review in batch_data:
             batch_idx.append(idx)
             x = self.tokenizer.encode('[CLS]' + review)
-            batch_X.append(torch.tensor(x))
+            origin_batch_X.append(torch.tensor(x))
             len_X.append(len(x))
             mask.append(torch.ones(len(x), dtype=torch.uint8))
+            if self.known_token:
+                for p, token in enumerate(x):
+                    if token not in self.known_token:
+                        x[p] = 100
+            batch_X.append(torch.tensor(x))
+        
         mask = nn.utils.rnn.pad_sequence(mask, batch_first=True, padding_value=0)
         batch_X = nn.utils.rnn.pad_sequence(batch_X, batch_first=True, padding_value=0)
-        return batch_X, len_X, mask, batch_idx
+        origin_batch_X = nn.utils.rnn.pad_sequence(origin_batch_X, batch_first=True, padding_value=0)
+        return batch_X, len_X, mask, batch_idx, origin_batch_X
 
 def main():
     pred_file_path = 'test.csv'
@@ -68,15 +77,15 @@ def main():
     if gpu:
         device = torch.device('cuda')
 
-    dataset = load_review_dataset('TRAIN/TEST/Test_reviews.csv')
-
     tokenizer = BertTokenizer(vocab_file='publish/vocab.txt', max_len=512)
+    _, known_token = load_dataset('TRAIN/Train_reviews.csv', 'TRAIN/Train_labels.csv', tokenizer)
+    dataset = load_review_dataset('TRAIN/TEST/Test_reviews.csv')
     dataset = Dataset(list(dataset.items()))
     dataloader = torch_data.DataLoader(
         dataset=dataset,
         batch_size=batch_size,
         shuffle=False,
-        collate_fn=test_collate_fn(tokenizer)
+        collate_fn=test_collate_fn(tokenizer, known_token)
     )
     bert_pretraining = convert_tf_checkpoint_to_pytorch('./publish/bert_model.ckpt', './publish/bert_config.json')
     model = Model(bert_pretraining.bert)
@@ -89,7 +98,7 @@ def main():
 
     pbar = tqdm()
     model.eval()
-    for step, (batch_X, len_X, mask, batch_idx) in enumerate(dataloader):
+    for step, (batch_X, len_X, mask, batch_idx, origin_batch_X) in enumerate(dataloader):
         batch_X = batch_X.to(device)
         mask = mask.to(device)
 
@@ -114,8 +123,10 @@ def main():
                         _opinion_cross[j] = True
                         category = ID2CATEGORY[pred_cross_category_target[b][i, j]]
                         polarity = ID2POLARITY[pred_cross_polarity_target[b][i, j]]
-                        aspect = tokenizer.decode(list(batch_X[b, _aspect_idx[i]].cpu().detach().numpy())).replace(' ', '')
-                        opinion = tokenizer.decode(list(batch_X[b, _opinion_idx[j]].cpu().detach().numpy())).replace(' ', '')
+                        aspect = tokenizer.decode(list(origin_batch_X[b, _aspect_idx[i]].cpu().detach().numpy())).replace(' ', '')
+                        opinion = tokenizer.decode(list(origin_batch_X[b, _opinion_idx[j]].cpu().detach().numpy())).replace(' ', '')
+                        # aspect = tokenizer.decode(list(batch_X[b, _aspect_idx[i]].cpu().detach().numpy())).replace(' ', '')
+                        # opinion = tokenizer.decode(list(batch_X[b, _opinion_idx[j]].cpu().detach().numpy())).replace(' ', '')
                         aspect_beg = len(tokenizer.decode(list(batch_X[b, 1:_aspect_idx[i][0]].cpu().detach().numpy())).replace(' ', ''))
                         aspect_end = aspect_beg + len(aspect)
                         opinion_beg = len(tokenizer.decode(list(batch_X[b, 1:_opinion_idx[j][0]].cpu().detach().numpy())).replace(' ', ''))
@@ -125,7 +136,8 @@ def main():
                 if _aspect_cross[i] == False:
                     category = ID2CATEGORY[pred_single_aspect_category_target[b][i]]
                     polarity = ID2POLARITY[pred_single_aspect_polarity_target[b][i]]
-                    aspect = tokenizer.decode(list(batch_X[b, _aspect_idx[i]].cpu().detach().numpy())).replace(' ', '')
+                    aspect = tokenizer.decode(list(origin_batch_X[b, _aspect_idx[i]].cpu().detach().numpy())).replace(' ', '')
+                    # aspect = tokenizer.decode(list(batch_X[b, _aspect_idx[i]].cpu().detach().numpy())).replace(' ', '')
                     aspect_beg = len(tokenizer.decode(list(batch_X[b, 1:_aspect_idx[i][0]].cpu().detach().numpy())).replace(' ', ''))
                     aspect_end = aspect_beg + len(aspect)
                     label.append((batch_idx[b], aspect, '_', category, polarity))
@@ -133,7 +145,8 @@ def main():
                 if _opinion_cross[i] == False:
                     category = ID2CATEGORY[pred_single_opinion_category_target[b][i]]
                     polarity = ID2POLARITY[pred_single_opinion_polarity_target[b][i]]
-                    opinion = tokenizer.decode(list(batch_X[b, _opinion_idx[i]].cpu().detach().numpy())).replace(' ', '')
+                    opinion = tokenizer.decode(list(origin_batch_X[b, _opinion_idx[i]].cpu().detach().numpy())).replace(' ', '')
+                    # opinion = tokenizer.decode(list(batch_X[b, _opinion_idx[i]].cpu().detach().numpy())).replace(' ', '')
                     opinion_beg = len(tokenizer.decode(list(batch_X[b, 1:_opinion_idx[i][0]].cpu().detach().numpy())).replace(' ', ''))
                     opinion_end = opinion_beg + len(opinion)
                     label.append((batch_idx[b], '_', opinion, category, polarity))

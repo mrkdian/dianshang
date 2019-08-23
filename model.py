@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.utils.data as torch_data
 from torch.autograd import Variable
+from nltk import FreqDist
 
 import numpy as np
 import time
@@ -19,6 +20,8 @@ import os
 import pickle
 import re
 import json
+
+UNK_TOKEN = 100
 
 B_A = 1 # begin of aspect
 I_A = 2
@@ -66,27 +69,48 @@ def convert_tf_checkpoint_to_pytorch(tf_checkpoint_path, bert_config_file):
     # torch.save(model.state_dict(), pytorch_dump_path)
     return model
 
-def load_dataset(review_filepath, label_filepath):
+def load_dataset(review_filepath, label_filepath, tokenizer, unk_upper_count=3):
     review_df = pd.read_csv(review_filepath, index_col='id')
     label_df = pd.read_csv(label_filepath, index_col='id')
 
-    # category2id = dict()
-    # category_list = sorted(list(set(label_df['Categories'])))
-    # for idx, category in enumerate(category_list):
-    #     category2id[category] = idx
-
+    vocab = FreqDist()
     dataset = dict()
     for idx, row in review_df.iterrows():
         review = row['Reviews']
+        tokens = tokenizer.encode(review)
+        for token in tokens:
+            vocab[token] += 1
+
         label = label_df.loc[idx]
         dataset[idx] = {
             'review': review,
             'label': []
         }
+    
     for idx, row in label_df.iterrows():
         dataset[idx]['label'].append(list(row))
-    
-    return dataset
+
+    known_token = set()
+    for char, char_count in vocab.items():
+        if char_count >= unk_upper_count:
+            known_token.add(char)
+
+    # total_token = 0
+    # vocab = sorted(list(vocab.items()), key=lambda x: x[1])
+    # vocab_freq = FreqDist()
+    # vocab_acc_freq = [(0, 0)]
+    # vocab_ratio = []
+    # vocab_acc_ratio = [(0, 0)]
+    # for char, count in vocab:
+    #     vocab_freq[count] += 1
+    #     total_token += count
+    # for count, char_count in vocab_freq.items():
+    #     vocab_freq[count] = char_count / len(vocab)
+    #     vocab_acc_freq.append((count, vocab_acc_freq[-1][1] + vocab_freq[count]))
+    #     vocab_ratio.append((count, count * char_count / total_token))
+    # for count, ratio in vocab_ratio:
+    #     vocab_acc_ratio.append((count, vocab_acc_ratio[-1][1] + ratio))
+    return dataset, known_token
 
 def split_dataset(dataset, shuffle_idx_file, ratio=0.6):
     if not os.path.exists(shuffle_idx_file):
@@ -112,8 +136,9 @@ class Dataset(torch_data.Dataset):
         return len(self.dataset)
 
 class collate_fn:
-    def __init__(self, tokenizer):
+    def __init__(self, tokenizer, known_token=None):
         self.tokenizer = tokenizer
+        self.known_token = known_token
     
     def __call__(self, batch_data):
         batch_size = len(batch_data)
@@ -136,17 +161,16 @@ class collate_fn:
             labels = data['label']
 
             x = self.tokenizer.encode('[CLS]' + review)
-            batch_X.append(torch.tensor(x))
+            # batch_X.append(torch.tensor(x))
             len_X.append(len(x))
             mask.append(torch.ones(len(x), dtype=torch.uint8))
+            _seq_target = torch.zeros(len(x), dtype=torch.long)
+            _seq_target[0] = -100 #  ignore [CLS] token
 
             c_p_label = [] # category and polarity label
             success_match = []
             _aspect_idx = []
             _opinion_idx = []
-            _seq_target = torch.zeros(len(x), dtype=torch.long)
-            _seq_target[0] = -100 #  ignore [CLS] token
-
             for label in labels:
                 #Aspect term
                 if label[0] != '_':
@@ -182,6 +206,11 @@ class collate_fn:
 
                 assert not (label[0] == '_' and label[3] == '_')
 
+            if self.known_token:
+                for p, token_idx in enumerate(x):
+                    if token_idx not in self.known_token:
+                        x[p] = UNK_TOKEN
+            batch_X.append(torch.tensor(x))
             
             _match_target = torch.zeros(len(_aspect_idx), len(_opinion_idx), dtype=torch.float) # binary cross entropy
             for a_id, o_id in success_match:
@@ -259,7 +288,8 @@ class Model(nn.Module):
         super().__init__()
         self.bert = bert
         self.emb_size = bert.config.hidden_size
-        self.general_lstm = nn.LSTM(input_size=self.emb_size, hidden_size=self.emb_size, batch_first=True)
+        # self.general_lstm = nn.LSTM(input_size=self.emb_size, hidden_size=self.emb_size,\
+        #     batch_first=True)
 
         self.crf = CRF(num_tags=5, batch_first=True)
         # self.positional_encoding = PositionalEncoding(self.emb_size, 0.1, max_len=512)
@@ -269,13 +299,12 @@ class Model(nn.Module):
         # self.aspect_encoder = nn.LSTM(input_size=self.emb_size, hidden_size=self.emb_size, batch_first=True)
         # self.opinion_encoder = nn.LSTM(input_size=self.emb_size, hidden_size=self.emb_size, batch_first=True)
 
-        self.lstm_a_att_q = nn.Linear(self.emb_size, 1) # query
-        self.lstm_o_att_q = nn.Linear(self.emb_size, 1)
-        self.lstm_a_att_k = nn.Linear(self.emb_size, self.emb_size) # key
-        self.lstm_o_att_k = nn.Linear(self.emb_size, self.emb_size)
-        self.lstm_a_att_v = nn.Linear(self.emb_size, self.emb_size) # value
-        self.lstm_o_att_v = nn.Linear(self.emb_size, self.emb_size)
-
+        # self.lstm_a_att_q = nn.Linear(self.emb_size, 1) # query
+        # self.lstm_o_att_q = nn.Linear(self.emb_size, 1)
+        # self.lstm_a_att_k = nn.Linear(self.emb_size, self.emb_size) # key
+        # self.lstm_o_att_k = nn.Linear(self.emb_size, self.emb_size)
+        # self.lstm_a_att_v = nn.Linear(self.emb_size, self.emb_size) # value
+        # self.lstm_o_att_v = nn.Linear(self.emb_size, self.emb_size)
 
         self.aspect_att_query = nn.Linear(self.emb_size, 1)
         self.opinion_att_query = nn.Linear(self.emb_size, 1)
@@ -384,7 +413,7 @@ class Model(nn.Module):
         device = batch_X.device
 
         bert_emb, _ = self.bert(batch_X, attention_mask=mask)
-        g_lstm_emb, _ = self.general_lstm(bert_emb)
+        # g_lstm_emb, _ = self.general_lstm(bert_emb)
         seq_score = self.seq_labeling(g_lstm_emb)
 
         if gather_idx is None:
@@ -403,8 +432,8 @@ class Model(nn.Module):
             _aspect_idx = aspect_idx[b]
             _opinion_idx = opinion_idx[b]
 
-            lstm_aspect_out = []
-            lstm_opinion_out = []
+            # lstm_aspect_out = []
+            # lstm_opinion_out = []
             bert_aspect_out = []
             bert_opinion_out = []
             _single_aspect_category_score = []
@@ -414,7 +443,7 @@ class Model(nn.Module):
 
             for idx in _aspect_idx:
                 bert_aspect_emb = torch.unsqueeze(bert_emb[b, idx], 0)
-                lstm_aspect_emb = torch.unsqueeze(g_lstm_emb[b, idx], 0)
+                # lstm_aspect_emb = torch.unsqueeze(g_lstm_emb[b, idx], 0)
                 # _, (a_h_out, a_c_cout) = self.aspect_encoder(aspect_emb)
                 # a_h_out = torch.unsqueeze(torch.sum(aspect_emb, dim=1), 1)
                 
@@ -426,22 +455,22 @@ class Model(nn.Module):
                 bert_a_out = torch.unsqueeze(torch.sum(val, dim=1), 1)
 
                 # attention mechanism from general lstm
-                key = self.lstm_a_att_k(lstm_aspect_emb)
-                val = self.lstm_a_att_v(lstm_aspect_emb)
-                att = self.lstm_a_att_q(key)
-                val = val * att
-                lstm_a_out = torch.unsqueeze(torch.sum(val, dim=1), 1)
+                # key = self.lstm_a_att_k(lstm_aspect_emb)
+                # val = self.lstm_a_att_v(lstm_aspect_emb)
+                # att = self.lstm_a_att_q(key)
+                # val = val * att
+                # lstm_a_out = torch.unsqueeze(torch.sum(val, dim=1), 1)
 
                 s_a_c_out = torch.squeeze(self.aspect_category(bert_a_out))
                 s_a_p_out = torch.squeeze(self.aspect_polarity(bert_a_out))
 
-                lstm_aspect_out.append(lstm_a_out)
+                # lstm_aspect_out.append(lstm_a_out)
                 bert_aspect_out.append(bert_a_out)
                 _single_aspect_category_score.append(s_a_c_out)
                 _single_aspect_polarity_score.append(s_a_p_out)
             for idx in _opinion_idx:
                 bert_opinion_emb = torch.unsqueeze(bert_emb[b, idx], 0)
-                lstm_opinion_emb = torch.unsqueeze(g_lstm_emb[b, idx], 0)
+                # lstm_opinion_emb = torch.unsqueeze(g_lstm_emb[b, idx], 0)
                 # _, (o_h_out, o_c_out) = self.opinion_encoder(opinion_emb)
                 # o_h_out = torch.unsqueeze(torch.sum(opinion_emb, dim=1), 1)
 
@@ -453,32 +482,32 @@ class Model(nn.Module):
                 bert_o_out = torch.unsqueeze(torch.sum(val, dim=1), 1)
 
                 # attention mechanism from general lstm
-                key = self.lstm_o_att_k(lstm_opinion_emb)
-                val = self.lstm_o_att_v(lstm_opinion_emb)
-                att = self.lstm_o_att_q(key)
-                val = val * att
-                lstm_o_out = torch.unsqueeze(torch.sum(val, dim=1), 1)
+                # key = self.lstm_o_att_k(lstm_opinion_emb)
+                # val = self.lstm_o_att_v(lstm_opinion_emb)
+                # att = self.lstm_o_att_q(key)
+                # val = val * att
+                # lstm_o_out = torch.unsqueeze(torch.sum(val, dim=1), 1)
 
                 s_o_c_out = torch.squeeze(self.opinion_category(bert_o_out))
                 s_o_p_out = torch.squeeze(self.opinion_polarity(bert_o_out))
 
-                lstm_opinion_out.append(lstm_o_out)
+                # lstm_opinion_out.append(lstm_o_out)
                 bert_opinion_out.append(bert_o_out)
                 _single_opinion_category_score.append(s_o_c_out)
                 _single_opinion_polarity_score.append(s_o_p_out)
 
-            assert len(bert_aspect_out) == len(lstm_aspect_out)
-            assert len(bert_opinion_out) == len(lstm_opinion_out)
+            # assert len(bert_aspect_out) == len(lstm_aspect_out)
+            # assert len(bert_opinion_out) == len(lstm_opinion_out)
             _cross_category_score = torch.empty(len(bert_aspect_out), len(bert_opinion_out), len(CATEGORY2ID.keys()), device=device)
             _cross_polarity_score = torch.empty(len(bert_aspect_out), len(bert_opinion_out), len(POLARITY2ID.keys()), device=device)
             _match_score = torch.empty(len(bert_aspect_out), len(bert_opinion_out), device=device)
             for i in range(len(bert_aspect_out)):
                 for j in range(len(bert_opinion_out)):
                     bert_a_out = bert_aspect_out[i]
-                    lstm_a_out = lstm_aspect_out[i]
+                    # lstm_a_out = lstm_aspect_out[i]
                     # a_p = _aspect_idx[i][0]
                     bert_o_out = bert_opinion_out[j]
-                    lstm_o_out = lstm_opinion_out[j]
+                    # lstm_o_out = lstm_opinion_out[j]
                     # o_p = _opinion_idx[j][0]
 
                     _match_score[i, j] = self.match(torch.cat((bert_a_out, bert_o_out), dim=-1))
@@ -678,10 +707,10 @@ def test():
     if gpu:
         device = torch.device('cuda')
 
-    dataset = load_dataset('TRAIN/Train_reviews.csv', 'TRAIN/Train_labels.csv')
+    tokenizer = BertTokenizer(vocab_file='publish/vocab.txt', max_len=512)
+    dataset, known_token = load_dataset('TRAIN/Train_reviews.csv', 'TRAIN/Train_labels.csv', tokenizer)
     train_dataset, validate_dataset = split_dataset(dataset, 'TRAIN/shuffle.idx', 0.97)
 
-    tokenizer = BertTokenizer(vocab_file='publish/vocab.txt', max_len=512)
     bert_pretraining = convert_tf_checkpoint_to_pytorch('./publish/bert_model.ckpt', './publish/bert_config.json')
     model = Model(bert_pretraining.bert)
 
@@ -715,7 +744,7 @@ def test():
     if load_save_model:
         model.load_state_dict(torch.load('./save_model/best.model'))
 
-    for epoch in range(1):
+    for epoch in range(15):
         print(str(epoch) + '------------------------------------------------------------------')
         accum_total_loss = 0
         accum_seq_labeling_loss = 0
@@ -883,15 +912,15 @@ def test():
         }
         avg_f1 = (np.sum(seq_metric) + match_f1 + category_f1 + polarity_f1) / 8
         print('avg: %f' % avg_f1)
-    #     if avg_f1 > statistic['best_f1']:
-    #         statistic['best_f1'] = avg_f1
-    #         statistic['best_f1_epoch'] = epoch
-    #         torch.save(model.state_dict(), 'drive/best.model')
-    #     if match_f1 > statistic['best_match_f1']:
-    #         statistic['best_match_f1'] = match_f1
-    #         statistic['best_match_epoch'] = epoch
-    #         torch.save(model.state_dict(), 'drive/best_match.model')
-    #     statistic['epoch_detail'].append(epoch_statistic)
+        if avg_f1 > statistic['best_f1']:
+            statistic['best_f1'] = avg_f1
+            statistic['best_f1_epoch'] = epoch
+            torch.save(model.state_dict(), 'save_model/best.model')
+        if match_f1 > statistic['best_match_f1']:
+            statistic['best_match_f1'] = match_f1
+            statistic['best_match_epoch'] = epoch
+            torch.save(model.state_dict(), 'save_model/best_match.model')
+        statistic['epoch_detail'].append(epoch_statistic)
     # json.dump(statistic, open('statistic.json', mode='w'))
 
 if __name__ == '__main__':
